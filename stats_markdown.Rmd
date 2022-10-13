@@ -1,0 +1,636 @@
+---
+title: "Statistics"
+author: "MEENOWA Sarvesh"
+date: "28/11/2021"
+output: 
+ pdf_document:
+        latex_engine: xelatex
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+
+```{r}
+
+# Import required packages
+library(readr)
+library(plyr)
+library(dplyr)
+library(plotly)
+library(xtable)
+library(tufte)
+library(summarytools)
+library(dplyr)
+library(vcd)
+#install.packages("multcomp")
+library(multcomp)
+library(finalfit)
+library(DHARMa)
+library(ggplot2)
+#install.packages("pscl")
+library(pscl) #McFadden , pseudo-R2 library
+library(survival)
+library(survminer)
+library(naniar)
+library(broom)
+
+
+```
+
+
+# 3 Data wrangling, feature engineering
+
+```{r}
+# Import effec data files
+effec1_df <- read_csv("H:/Downloads/Datatsets/effec1.quest.compil.csv", 
+                      locale = locale(encoding = "ISO-8859-1"))
+effec2_df <- read_csv("H:/Downloads/Datatsets/effec2.quest.compil.csv", 
+                      locale = locale(encoding = "ISO-8859-1"))
+effec3_df <- read_csv("H:/Downloads/Datatsets/effec3.quest.compil.csv", 
+                      locale = locale(encoding = "ISO-8859-1"))
+```
+
+```{r}
+# rbind(append rows) effec data files
+effec_df <- rbind.fill(effec1_df, effec2_df, effec3_df)
+
+```
+
+```{r}
+
+# Import usages_effec data files
+usages_effec1_df <- read_csv("H:/Downloads/Datatsets/usages.effec1.csv")
+usages_effec2_df <- read_csv("H:/Downloads/Datatsets/usages.effec2.csv")
+usages_effec3_df <- read_csv("H:/Downloads/Datatsets/usages.effec3.csv")
+```
+```{r}
+# rbind usages_effec data files
+usages_effec_df <- rbind.fill(usages_effec1_df, usages_effec2_df, 
+                              usages_effec3_df)
+```
+
+```{r}
+# Merge effec_df and usages_effec_df with Student_ID as key
+df_no_HDI <- full_join(effec_df, usages_effec_df, by="Student_ID")
+```
+
+```{r}
+# Import countries_hdi data file
+#Assign headers to each column i.e Country, HDI, and index
+countries_HDI_df <- read_csv("H:/Downloads/Datatsets/countries.HDI.csv", 
+                             locale = locale(encoding = "ISO-8859-1"), 
+                             col_names = c("Country","HDI", "Index"))
+```
+
+```{r}
+# Change H and M HDI to I
+##Group together, for the HDI variable, the High and Medium level to create a
+#new intermediate level.
+levels(countries_HDI_df$HDI) <- c(levels(countries_HDI_df$HDI), "I")
+countries_HDI_df$HDI[countries_HDI_df$HDI == "M"]  <- "I"
+countries_HDI_df$HDI[countries_HDI_df$HDI == "H"]  <- "I"
+```
+
+```{r}
+# Merge df_no_HDI and countries_HDI_df
+full_df <- full_join(df_no_HDI, countries_HDI_df[c("Country","HDI")], by = "Country")
+```
+
+```{r warning=FALSE}
+#export full df as csv
+#write.csv(full_df,"H:/Downloads/Datatsets/full_df.csv", row.names = FALSE)
+
+full_df <- read.csv("H:/Downloads/Datatsets/full_df.csv", encoding="utf-8")
+```
+
+
+
+
+
+# 4 Describing behaviour of the courses
+
+```{r}
+#completers , exam bin is used as proxy for completion
+completers = nrow(full_df[which(full_df$Exam.bin == 1),])   
+#get number of videos for each student
+full_df$n.videos <- rowSums(full_df[,60:94],na.rm=T)
+#auditors
+auditing = nrow(full_df %>% filter(Exam.bin == 0  & last.quizz ==0 & Assignment.bin==0&n.videos/35 >0.1))
+#bystanders
+bystanders = nrow(full_df %>% filter(Exam.bin == 0  & last.quizz ==0 & Assignment.bin==0&n.videos/35 <=0.1) )
+#disengaged learners
+disengaged = nrow(full_df %>% filter(Exam.bin == 0 & (Quizz.1.bin == 1 | Quizz.2.bin == 1 | Quizz.3.bin == 1 | Quizz.4.bin == 1 | Quizz.5.bin == 1 | Assignment.bin == 1)))
+```
+
+
+
+```{r}
+#adding type of learners to our dataframe to use them later in survival analysis
+full_df <- full_df %>% 
+       mutate(learner = case_when(Exam.bin == 1 ~ "completers", 
+                                Exam.bin == 0  & last.quizz ==0 & Assignment.bin==0&n.videos/35 >0.1 ~ "auditing",
+                                Exam.bin == 0  & last.quizz ==0 & Assignment.bin==0&n.videos/35 <=0.1 ~ "bystanders",
+                                Exam.bin == 0 & (Quizz.1.bin == 1 | Quizz.2.bin == 1 | Quizz.3.bin == 1 | Quizz.4.bin == 1 |   Quizz.5.bin == 1 | Assignment.bin == 1) ~ "disengaged"
+       ))
+
+```
+
+
+
+
+```{r}
+#create dataframe of type of learners and their values
+df_prop <- data.frame(first_column=c('Completers','Auditing','Bystanders','Disengaged'),
+                     second_column=c(completers,auditing,bystanders,disengaged))
+```
+
+```{r}
+#rename columns
+colnames(df_prop) <- c("Types","Values")
+```
+
+
+```{r}
+#plot pie chart in plotly
+fig <- plot_ly()
+
+
+fig <- df_prop %>% plot_ly(type='pie', labels=~Types, values=~Values,textinfo="label+percent+value",
+
+              insidetextorientation='radial')
+
+fig
+```
+
+## 5.1 From Student’s t-test to two-ways ANOVAs
+
+Compare the number of views of videos between genders. 
+
+* Assuming equal variance, var = T
+
+```{r}
+t.test(n.videos ~ Gender,data=full_df,var.equal=T)
+
+```
+
+* Assuming unequal variance , var = F
+```{r}
+
+t.test(n.videos ~ Gender,data=full_df,var.equal=F)
+```
+
+* Which test should you use to assess whether the difference is statistically significant ? 
+  + comparing two independent groups 
+  
+
+
+ Compare the number of views of videos depending on the HDI of the country of origin. Same questions. Which test should you use to assess whether the difference is statistically significant ?
+ 
+```{r}
+#HDI has more than 2 groups, so we use one-way anova
+model1 <- aov(n.videos ~ HDI, data = full_df)
+anova(model1)
+```
+ 
+```{r}
+#get latex table
+#print(xtable(model1))
+```
+ 
+* What is the difference between the two tests you just used ?
+  + difference between independent t-tests and one way ANOVA 
+  
+  
+Use Gender, HDI and socioeconomic status as explaining variables (lm command in R, lm(y x1+x2)). Introduce an ANOVA table (anova(model) in R) in your report. (socioeconomic status ==> CSP)
+```{r}
+
+model2 <- anova(lm(n.videos~HDI,full_df))
+model2
+#get latex table of model 2
+#print(xtable(model2))
+
+```
+
+```{r}
+#Gender and HDI- ind.variables
+model3 <- anova(lm(n.videos~Gender+HDI,full_df))
+model3
+#print(xtable(model3))
+```
+
+```{r}
+#ind var : gender, hdi, csp
+model4 <- anova(lm(n.videos~Gender+HDI+CSP,full_df))
+model4
+#print(xtable(model4))
+```
+
+## 5.2 Model refinement, pairwise comparisons
+
+Update the model, and add an interaction parameter in the it (For instance Gender*HDI in R). Use the summary of the model to see the interaction parameter. 
+```{r}
+
+model5 <- lm(n.videos~Gender+HDI+Gender*HDI,full_df)
+model5
+print(summary(model5))
+```
+
+
+```{r}
+#print(xtable(summary(model5)))
+```
+
+```{r}
+#tukey hsd on interaction parameters
+model_interaction <- aov(n.videos~Gender*HDI, data=full_df)
+
+
+
+TukeyHSD(model_interaction, conf.level=.95)
+#xtable(tidy(TukeyHSD(model_interaction, conf.level=.95)))
+
+```
+
+
+
+ Use a stepwise algorithm (step command in R) to assess the performance of various versions of the model (use both forward and backward options).
+ 
+```{r}
+#convert birth year to integer
+full_df$birth.year <- as.integer(full_df$birth.year)
+
+#create age groups 
+full_df$birth.year[full_df$birth.year<1940] <- NA
+full_df$birth.year[full_df$birth.year>2020]<- NA
+#calculate age
+full_df$age <- 2020-full_df$birth.year
+#create seq
+seq_1 = seq(0,90,by=3)
+#break age into seq1
+full_df$age.group <- cut(full_df$age,seq_1)
+
+head(full_df$age.group)
+#remove all Nas in the following variables
+full_df_subset = na.omit(full_df[c('Gender','HDI','n.videos','CSP','age.group','CSP.fin')])
+
+model6 <- lm(n.videos~Gender+HDI+CSP+age.group,full_df_subset)
+
+step(model6,direction="both")
+
+```
+ 
+
+```{r}
+#Linear model with 3 ind var : Gender,HDI,csp + interaction parameter(Gender*HDI)
+anova(lm(n.videos~Gender+HDI+CSP.fin,full_df_subset))
+#xtable(anova(lm(n.videos~Gender+HDI+CSP.fin,full_df_subset)))
+tidy(TukeyHSD(aov(lm(n.videos~Gender+HDI+CSP.fin,full_df_subset))))
+#xtable(tidy(TukeyHSD(aov(lm(n.videos~Gender+HDI+CSP.fin,full_df_subset)))))
+```
+* Age group is divided into too many parts, so we create a smaller group
+
+```{r}
+
+#create second age group
+full_df$Age.group <- cut(full_df$age,c(0,30,50,80,100))
+
+head(full_df$age.group2)
+
+full_df_subset = na.omit(full_df[c('Gender','HDI','n.videos','CSP','age.group','Age.group','CSP.fin')])
+
+
+
+model7 <- lm(n.videos~Gender+HDI+CSP.fin+Age.group,full_df_subset)
+
+(summary(step(model7,direction="both")))
+```
+```{r}
+#create second age group
+full_df$age.group2 <- cut(full_df$age,c(0,30,50,80,100))
+
+head(full_df$age.group2)
+#create subset for linear model
+
+full_df_subset = na.omit(full_df[c('Gender','HDI','n.videos','CSP.fin','age.group','age.group2','learner','Age.group')])
+#create linear model for HDI,CSP, 
+model7 <- lm(n.videos~Gender+HDI+CSP.fin+Age.group,full_df_subset)
+
+(summary(step(model7,direction="both")))
+```
+ 
+```{r}
+#latex table for figure 
+print(xtable((summary(step(model7,direction="both")))))
+```
+* Assess the colinearity of all three independant variables of the last model (excluding interaction parameters). To do that, use a chi-test between HDI and Gender, produce a mosaic plot and propose its interpretation (look for residuals below -2 or above 2).
+  + referring to the linear model of n.videos ~ Gender + HDI + CSP 
+  
+
+
+```{r}
+#references
+#https://statsandr.com/blog/chi-square-test-of-independence-in-r/
+#http://www.sthda.com/english/wiki/chi-square-test-of-independence-in-r
+#For interpretation purposes
+```
+
+```{r}
+full_df_subset2 = na.omit(full_df[c('Gender','HDI','n.videos','CSP')])
+
+
+chisq <- chisq.test(table(full_df_subset2$Gender,full_df_subset2$HDI))
+chisq
+
+#install.packages('summarytools') 
+
+# fourth method:
+full_df_subset2 %$%
+  ctable(Gender, HDI,
+    prop = "r", chisq = TRUE, headings = FALSE
+  ) %>%
+  print(
+    method = "render",
+    style = "rmarkdown",
+    footnote = NA
+  )
+
+
+mosaic(~ Gender + HDI,
+  direction = c("v", "h"),
+  data = full_df_subset2,
+  shade = TRUE
+)
+
+```
+Use Tukey HSD, and propose a table, to see the pairwise differences between learners of different socioeconomic status.
+```{r}
+model8 <- aov(n.videos~age.group2, data=full_df_subset)
+
+
+
+TukeyHSD(model8, conf.level=.95)
+
+#need to resize plot
+plot(TukeyHSD(model8, conf.level=.95),las=3)
+
+
+```
+
+```{r}
+#new model with gender, hdi, csp and age group 2
+model9 <- aov(n.videos~Gender+HDI+CSP.fin+Age.group, data=full_df_subset)
+
+#apply tukeyhsd to pairwise comparisons
+thsd <- TukeyHSD(model9, conf.level=.95)
+#xtable(tidy(thsd))
+
+plot(TukeyHSD(model9, conf.level=.95))
+```
+
+Output is too big for tukeyhsd + CSP, so we can try other alternatives
+
+
+```{r}
+#new model with gender, hdi,learner type and age group 2
+model_10 <- aov(n.videos~Gender+HDI+Age.group, data=full_df_subset)
+
+#apply tukeyhsd to pairwise comparisons
+thsd <- TukeyHSD(model_10, conf.level=.95)
+#thsd
+#xtable(tidy(thsd))
+
+plot(TukeyHSD(model_10, conf.level=.95))
+
+```
+
+
+* In order to get a better understanding of the issue of pairwise comparisons,we designed a dataset with many continuous variables. Use parwise comparisons with the lm model to detect statistically significant relationships between variables. What variables appear to be correlated ? Include a graph in your report and comment it.
+* First step/method : use Tukey HSD for pairwise comparisons , we can also use glht method with tukey to produce pairwise comparisons
+* Apply bonferroni
+
+```{r}
+##### Using glht method
+
+#create model 10
+
+model10 <- lm(n.videos~Gender+HDI+CSP.fin+age.group2,data=full_df_subset)
+```
+
+
+```{r}
+# running glht()
+post.hoc <- glht(model10)
+
+# displaying the result table with summary()
+summary(post.hoc)
+
+```
+
+```{r}
+#apply bonferroni
+summary(post.hoc, test = adjusted("bonferroni"))
+
+```
+
+```{r}
+tidy(pairwise.t.test(full_df_subset$n.videos, full_df_subset$CSP.fin , p.adjust="bonferroni"))
+```
+
+
+
+# 6.1 Producing an Odd-Ratios table (Logistic Regression)
+
+Use a logistic regression model (glm in R, binary family) to test whether completion, in the course, is linked to the user characteristics that you studied earlier.
+Make an odd-ratio table. Signal the odd-ratios that are significant in terms of
+p-value (with stars). Interpret the results by providing
+at least two alternative explanations for how socioeconomic status, or human
+development index, is linked to completion.
+
+```{r}
+
+# if event is rare, odds ratio and relative risk are almost the same
+mod_reg1 = glm(Exam.bin ~ Gender + HDI,data=full_df,family='binomial')
+aov(mod_reg1)
+
+
+```
+
+
+```{r}
+A=exp(coef(mod_reg1))    # Odd ratios
+exp(confint(mod_reg1))  # calculate confidence intervals
+
+summary(mod_reg1)
+anova(mod_reg1)
+
+```
+
+```{r}
+#OR table with confidenc intervals
+exp(cbind(OR = coef(mod_reg1), confint.default(mod_reg1)))
+
+```
+
+```{r}
+#pseudo-R2 , McFadden
+pR2(mod_reg1)
+```
+
+```{r}
+#optional
+# if we want to change the reference
+mod_reg2 = glm(Exam.bin ~ HDI +relevel(as.factor(Gender), ref = "une femme"),data=full_df,family='binomial')
+summary(mod_reg2)
+
+
+
+```
+
+```{r}
+#Model 3 , completion ~ Gender + CSP + HDI
+mod_reg3 = glm(Exam.bin ~ Gender + HDI + CSP.fin + Age.group,data=full_df,family='binomial')
+
+# ORS + confidence intervals
+C = exp(cbind(OR = coef(mod_reg3), confint.default(mod_reg3)))
+
+
+C
+```
+
+```{r}
+summary(mod_reg3)
+```
+
+```{r}
+#Odds-ratio plot also known as forest plot
+full_df %>%   or_plot('Exam.bin', c('Gender','HDI'), 
+          breaks = c(0.5, 1, 5, 10, 20, 30),
+          table_text_size = 3.5)
+
+#Odds-ratio plot but with csp
+# full_df %>%   or_plot('Exam.bin', c('Gender','HDI','CSP.fin'), 
+#           breaks = c(0.5, 1, 5, 10),
+#           table_text_size = 3)
+
+# lev.init=levels(full_df$CSP.fin)  
+# full_df$CSP.fin2=full_df$CSP.fin
+# lev.init
+# levels(full_df$CSP.fin2)=c("Autre","Cadres et professions intellectuelles","Employés","En recherche d'emploi","Etudiants")
+
+#Odds-ratio plot with Gender, HDi and Age group
+full_df %>% mutate(CSP.fin=factor(CSP.fin,levels=c("Artisans, commerçants, chefs d'entreprise",'Employés',"Autre","Cadres et professions intellectuelles","En recherche d'emploi","Etudiants"))) %>%   or_plot('Exam.bin', c('Gender','HDI','CSP.fin','Age.group'), 
+          breaks = c(0.5, 1, 5, 10),
+          table_text_size = 3.5)
+#we can see for csp, the variables aren't statistically significant, so we can take gender and HDi only
+
+#Forest OR plot with female as reference instead of male
+
+full_df %>% mutate(Gender=factor(Gender,levels=c('une femme','un homme'))) %>%
+   or_plot('Exam.bin', c('Gender','HDI'), table_text_size = 3.5)
+```
+# 6.2 Poisson model for count data
+
+```{r}
+ 
+qplot(full_df$n.videos,
+      geom="histogram",
+      binwidth = 5,  
+      xlab = "Number of videos",  
+      ylab="Count",
+      fill=I("blue"), 
+      col=I("black"), 
+      alpha=I(.2),
+    ) +   geom_density()
+
+```
+
+
+
+```{r}
+
+#poisson model <=> family="poisson" 
+mod_reg4 = glm(n.videos ~ Gender+HDI,data=full_df,family=poisson(link="log"))
+#mod_reg4 = glm(n.videos ~ Gender+HDI,data=full_df,family=quasipoisson)
+
+summary(mod_reg4)
+#latex table
+#print(xtable(summary(mod4)))
+```
+Residual analysis of poisson model
+* Check homoscedasticity of the residuals i.e residual analysis ==> homoscedasticity assumes the residuals are approximately equal for all predicted dependent variable scores , assumes equal variance
+
+
+
+
+```{r}
+#check for homoscedasticity
+plot(simulateResiduals(mod_reg4))
+```
+
+
+# 7 Survival Analysis
+
+* You must reason in terms of proportion of the available videos that the learner
+viewed. Prepare the data so that they are fit for a survival analysis.
+```{r}
+#check deciles for number of videos
+n.videos_dec = quantile(full_df$n.videos, probs = seq(.1, .9, by = .1))
+#add deciles (new column ) for the number of videos
+#using mutate method
+full_df<-full_df %>%
+  mutate(n.videos.decile = ntile(n.videos, 10)) 
+
+# add status based on deciles
+full_df$status.vid=rep(NA, nrow(full_df))
+for (i in 1:nrow(full_df)) {
+  if (full_df$n.videos.decile[i]<10) {full_df$status.vid[i]=1}
+  if (full_df$n.videos.decile[i]==10) {full_df$status.vid[i]=0}  
+}
+
+```
+
+* Compare video consumption behavior between auditing and disengaging learners,
+but this time with a survival analysis (and not the linear model like you did
+earlier).
+- plot the survival curve. Where do you
+see the most significative drop in terms of video consumption ?
+
+```{r}
+#number of videos survival analysis based on HDI
+surv_mod1 <- survfit(Surv(n.videos.decile, status.vid) ~ HDI , data=full_df)
+ggsurvplot(surv_mod1, data = full_df ,xlab="Video Decile N°")
+```
+
+
+```{r}
+#number of videos survival analysis based on Gender
+surv_mod2 <- survfit(Surv(n.videos.decile, status.vid) ~ Gender , data=full_df)
+ggsurvplot(surv_mod2, data = full_df, xlab="Video Decile N°")
+```
+
+```{r}
+#number of videos survival analysis based on type of learners(completers, disengaging etc)
+surv_mod3 <- survfit(Surv(n.videos.decile, status.vid) ~ learner , data=full_df)
+ggsurvplot(surv_mod3, data = full_df,xlab="Video Decile N°")
+```
+
+Compute the hazard ratios
+```{r}
+#Calculate hazard ratios using coxph
+mod_cox <- coxph(formula = Surv(n.videos.decile, status.vid) ~ Gender+HDI+learner, data = full_df)
+
+mod_cox
+```
+
+References are : Male(for gender), Low(For HDI), auditing (for types of learners)
+
+```{r}
+#hazard ratios in forest plot
+ggforest(mod_cox,data=full_df)
+
+```
+Brief interpretation : people from rich countries tend to disengage much slower from the course than people from poor country(H=0.45,ref=poor,p-value<0.001)
+
